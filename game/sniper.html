@@ -1,0 +1,256 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>8-bit Sniper — Sensitive Scope</title>
+<style>
+  html,body{height:100%;margin:0;background:#111;color:#ddd;font-family:Arial}
+  .wrap{padding:0;margin:0}
+  canvas{image-rendering:pixelated;background:#4b6b88;border:6px solid #222;position:fixed;top:0;left:0;width:100vw;height:100vh;display:block;}
+  .ui{position:fixed;right:12px;top:12px;width:300px;backdrop-filter: blur(4px);}
+  .panel{background:#0f0f0f;padding:12px;border-radius:6px;border:1px solid #222;margin-bottom:12px}
+  button{background:#222;color:#fff;padding:8px;border-radius:6px;border:1px solid #333}
+  .small{font-size:13px;color:#aaa}
+</style>
+</head>
+<body>
+  <div class="wrap">
+  <canvas id="world"></canvas>
+  <div class="ui">
+    <div class="panel">
+      <div style="font-weight:700">8-bit Sniper — Sensitive Scope</div>
+      <div class="small">Sihib väga eba-stabiilselt (sway). Hoia Shift, et hingamist kinni hoida (stabiilsem).</div>
+    </div>
+    <div class="panel">
+      <div style="font-weight:700">Score</div>
+      <div id="score" style="font-size:24px">0</div>
+    </div>
+    <div class="panel small">
+      <div>Kontrollid:</div>
+      <div>- Liiguta hiirt: sa sihid (kuid väga tundlik)</div>
+      <div>- Klõps vasak: tulista</div>
+      <div>- Shift: hoia stabiilsem (vähem sway)</div>
+      <div>- R: restart</div>
+    </div>
+    <div class="panel small">
+      <div style="font-weight:700">Sihtmärgid</div>
+      <div>- Kollane part (lihtne)</div>
+      <div>- Pruun karu (suurem, aeglasem)</div>
+    </div>
+    <div style="display:flex;gap:8px"><button id="restart">Restart</button><button id="more">Tweak</button></div>
+  </div>
+</div>
+
+<script>
+// 8-bit sniper: world canvas, magnified scope view + heavy sway
+const world = document.getElementById('world');
+const ctx = world.getContext('2d');
+let W = Math.max(320, window.innerWidth);
+let H = Math.max(180, window.innerHeight);
+
+function resizeCanvas(){
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(320, Math.floor(window.innerWidth));
+  const h = Math.max(180, Math.floor(window.innerHeight));
+  world.width = Math.floor(w * dpr);
+  world.height = Math.floor(h * dpr);
+  world.style.width = w + 'px';
+  world.style.height = h + 'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  W = w; H = h;
+}
+window.addEventListener('resize', resizeCanvas);
+const scoreEl = document.getElementById('score');
+let score = 0;
+
+// game state
+let mouseX = W/2, mouseY = H/2;
+let camX = W/2, camY = H/2; // camera aim position (affected by sway and mouse)
+let sensitivity = 1.6; // multiplies mouse movement
+let swayMag = 14; // pixels of sway (very sensitive/unstable)
+let swaySpeed = 0.9;
+let holdBreath = false;
+let spawnTimer = 0;
+let targets = [];
+let running = true;
+
+// preload PNG sprites (place bear.png and duck.png in the same `game/` folder)
+const duckImg = new Image(); duckImg.src = 'duck.png';
+const bearImg = new Image(); bearImg.src = 'bear.png';
+
+// simple sprite draw helpers (pixel art)
+function drawRect(x,y,w,h,color){ ctx.fillStyle=color; ctx.fillRect(x,y,w,h); }
+
+function spawnTarget(){
+  const types = ['duck','bear'];
+  const t = types[Math.random()<0.7?0:1];
+  const y = 20 + Math.random()*(H-60);
+  const dir = Math.random()<0.5?1:-1;
+  const x = dir===1? -20 : W+20;
+  const speed = t==='duck' ? (0.6 + Math.random()*1.0) : (0.3 + Math.random()*0.6);
+  targets.push({type:t,x:x,y:y,dir:dir,speed:speed,alive:true});
+}
+
+function drawTarget(t){
+  if(t.type==='duck'){
+    // draw duck PNG if available, otherwise pixel fallback
+    if(duckImg && duckImg.complete && duckImg.naturalWidth){
+      const sz = Math.max(12, Math.min(48, Math.floor(Math.min(W,H)*0.06)));
+      ctx.drawImage(duckImg, t.x - sz/2, t.y - sz/2, sz, sz);
+    } else {
+      ctx.fillStyle='#ffd100';
+      ctx.fillRect(t.x-3,t.y-3,6,6);
+      ctx.fillStyle='#c18b00'; ctx.fillRect(t.x+2,t.y-1,2,1);
+    }
+  } else {
+    // bear - PNG or pixel fallback
+    if(bearImg && bearImg.complete && bearImg.naturalWidth){
+      const sz = Math.max(28, Math.min(84, Math.floor(Math.min(W,H)*0.12)));
+      ctx.drawImage(bearImg, t.x - sz/2, t.y - sz/2, sz, sz);
+    } else {
+      ctx.fillStyle='#7a3b00'; ctx.fillRect(t.x-8,t.y-8,16,16);
+      ctx.fillStyle='#5b2a00'; ctx.fillRect(t.x-4,t.y-4,8,4);
+    }
+  }
+}
+
+// handle input
+document.addEventListener('mousemove', e=>{
+  // convert page mouse to canvas coords (simple)
+  const r = world.getBoundingClientRect();
+  const mx = (e.clientX - r.left) * (W / r.width);
+  const my = (e.clientY - r.top) * (H / r.height);
+  // sensitivity: small mouse delta -> large camera move
+  mouseX = Math.max(0, Math.min(W, mx));
+  mouseY = Math.max(0, Math.min(H, my));
+});
+
+document.addEventListener('keydown', e=>{ if(e.key==='Shift') holdBreath=true; if(e.key.toLowerCase()==='r') restart(); });
+document.addEventListener('keyup', e=>{ if(e.key==='Shift') holdBreath=false; });
+
+world.addEventListener('mousedown', e=>{ shoot(); });
+
+function shoot(){
+  // calculate aim point = camX, camY
+  // check targets near aim
+  const hitRadius = 8; // small high-precision
+  for(const t of targets){ if(!t.alive) continue; const dx = t.x - camX, dy = t.y - camY; if(Math.hypot(dx,dy) < hitRadius + (t.type==='bear'?6:0)){
+      t.alive=false; score += (t.type==='duck'?10:30); scoreEl.textContent = score; break;
+  }}
+}
+
+function restart(){ score=0; scoreEl.textContent=0; targets=[]; }
+
+audioCtx = null;
+
+function update(dt){
+  // spawn targets occasionally
+  spawnTimer -= dt;
+  if(spawnTimer<=0){ spawnTarget(); spawnTimer = 800 + Math.random()*1200; }
+
+  // update targets
+  for(const t of targets){ if(!t.alive) continue; t.x += t.dir * t.speed * (dt/16); if(t.x < -40 || t.x > W+40) t.alive=false; }
+
+  // calculate sway: noise-based
+  const time = performance.now()/1000;
+  const baseSway = swayMag * (holdBreath?0.18:1);
+  const sx = Math.sin(time*swaySpeed*1.3)*baseSway + (Math.sin(time*3.1)*0.4*baseSway);
+  const sy = Math.cos(time*swaySpeed*0.9)*baseSway*0.6 + (Math.cos(time*2.2)*0.3*baseSway);
+
+  // camera follows mouse but with amplified sensitivity and sway applied
+  camX = mouseX + sx * sensitivity;
+  camY = mouseY + sy * sensitivity;
+  camX = Math.max(0, Math.min(W, camX)); camY = Math.max(0, Math.min(H, camY));
+
+  // occasionally add small random kick to make it very unstable
+  if(Math.random() < 0.02) camX += (Math.random()-0.5)*12*sensitivity;
+  if(Math.random() < 0.02) camY += (Math.random()-0.5)*8*sensitivity;
+}
+
+function drawScope(){
+  // draw magnified view in center as scope overlay
+  const zoom = 3.5;
+  const sw = 80, sh = 80; // size of scope view in pixels (on canvas units)
+  const sx = camX - sw/(2*zoom), sy = camY - sh/(2*zoom);
+  // draw world-to-world: render a zoomed rect
+  // draw background blurred by scaling
+  ctx.save();
+  ctx.beginPath();
+  const cx = W/2, cy = H/2; const r = Math.min(W,H)/2 - 4;
+  ctx.arc(cx, cy, r, 0, Math.PI*2);
+  ctx.clip();
+
+  ctx.drawImage(world, sx, sy, sw/zoom, sh/zoom, cx - sw/2, cy - sh/2, sw, sh);
+  ctx.restore();
+
+  // scope rim
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(W/2,H/2,r,0,Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(W/2,H/2,r-6,0,Math.PI*2); ctx.stroke();
+  // crosshair jitter (very sensitive)
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(W/2-12,H/2); ctx.lineTo(W/2+12,H/2); ctx.moveTo(W/2,H/2-12); ctx.lineTo(W/2,H/2+12); ctx.stroke();
+}
+
+function fullDraw(){
+  // draw world scene to an offscreen (we use same canvas but draw world first then overlay scope)
+  ctx.fillStyle = '#6ea8c8'; ctx.fillRect(0,0,W,H); // sky
+  // ground tiles (8-bit)
+  for(let x=0;x<W;x+=8){ ctx.fillStyle = (x%16===0)?'#3a5a3a':'#2e4a2e'; ctx.fillRect(x,H-28,8,28); }
+  // draw targets in world coordinates
+  for(const t of targets) if(t.alive) drawTarget(t);
+
+  // draw faint camera reticle in world (where camera aims)
+  ctx.fillStyle='rgba(255,255,255,0.06)'; ctx.fillRect(camX-1, camY-1, 2,2);
+
+  // overlay scope on top
+  drawScope();
+
+  // HUD tiny
+  ctx.fillStyle='#fff'; ctx.font='10px monospace'; ctx.fillText('SCORE: '+score,6,12);
+}
+
+let last = performance.now();
+function loop(){
+  const now = performance.now(); const dt = now - last; last = now; if(running){ update(dt); }
+  // draw a separate "world buffer" into canvas: to simulate zoom we draw the whole scene to canvas then copy parts in scope
+  // clear
+  ctx.clearRect(0,0,W,H);
+  // draw world base (background + targets) on a temporary pass
+  // We'll draw world contents to canvas and then use drawScope to copy zoomed area
+  // world content
+  ctx.save();
+  // draw simple world onto canvas (we'll reuse for zoom)
+  ctx.fillStyle = '#6ea8c8'; ctx.fillRect(0,0,W,H);
+  for(let x=0;x<W;x+=8){ ctx.fillStyle = (x%16===0)?'#3a5a3a':'#2e4a2e'; ctx.fillRect(x,H-28,8,28); }
+  for(const t of targets) if(t.alive) drawTarget(t);
+  ctx.restore();
+
+  // now overlay scope (this uses current camX/camY and re-samples canvas)
+  drawScope();
+
+  // small vignette border
+  ctx.fillStyle='rgba(0,0,0,0.28)'; ctx.beginPath(); ctx.rect(0,0,W,10); ctx.fill();
+
+  requestAnimationFrame(loop);
+}
+
+// initial spawn
+// start when the page and assets have loaded to avoid timing issues
+spawnTimer = 200;
+window.addEventListener('load', ()=>{
+  resizeCanvas();
+  mouseX = W/2; mouseY = H/2; camX = W/2; camY = H/2;
+  loop();
+});
+
+// quick tweak button
+document.getElementById('more').addEventListener('click', ()=>{
+  // cycle sensitivity/sway presets
+  if(swayMag>12){ swayMag = 6; sensitivity = 1.0; } else if(swayMag>4){ swayMag = 16; sensitivity = 2.2; } else { swayMag = 22; sensitivity = 3.0; }
+});
+
+document.getElementById('restart').addEventListener('click', restart);
+
+</script>
+</body>
+</html>
