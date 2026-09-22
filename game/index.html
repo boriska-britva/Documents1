@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Hamster Skater 3D</title>
+    <!-- Tailwind CSS for UI -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Three.js for 3D Rendering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Cannon.js for 3D Physics -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #87CEEB; /* Sky blue */
+            font-family: 'Inter', sans-serif;
+            touch-action: none;
+        }
+        #game-container {
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+        .pointer-events-auto {
+            pointer-events: auto;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer" class="p-4">
+        <div class="flex justify-between items-start">
+            <div class="bg-white/80 backdrop-blur rounded-xl p-4 shadow-lg border border-gray-200 pointer-events-auto">
+                <h1 class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-orange-500 to-pink-500 mb-1">Hamster Parkour!</h1>
+                <p class="text-gray-700 text-sm font-medium">Controls:</p>
+                <ul class="text-gray-600 text-xs mt-1 space-y-1">
+                    <li><kbd class="bg-gray-200 px-1 rounded">W</kbd> / <kbd class="bg-gray-200 px-1 rounded">↑</kbd> - Move Forward</li>
+                    <li><kbd class="bg-gray-200 px-1 rounded">S</kbd> / <kbd class="bg-gray-200 px-1 rounded">↓</kbd> - Brake/Reverse</li>
+                    <li><kbd class="bg-gray-200 px-1 rounded">A</kbd> / <kbd class="bg-gray-200 px-1 rounded">D</kbd> - Steer</li>
+                    <li><kbd class="bg-gray-200 px-1 rounded">Space</kbd> - Jump</li>
+                </ul>
+            </div>
+            
+            <div id="score-display" class="bg-white/80 backdrop-blur rounded-xl p-3 shadow-lg font-bold text-lg text-blue-600">
+                Level 1
+            </div>
+        </div>
+
+        <div id="game-over" class="hidden absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center pointer-events-auto transition-opacity duration-300">
+            <div class="bg-white p-8 rounded-3xl shadow-2xl text-center transform scale-100 max-w-md mx-4">
+                <h2 id="end-title" class="text-4xl font-black text-red-500 mb-2">Wasted!</h2>
+                <p id="end-desc" class="text-gray-600 mb-6 text-lg">You fell into the abyss.</p>
+                <button onclick="resetGame()" class="w-full bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white font-bold py-4 px-6 rounded-xl shadow-lg transition transform hover:scale-105 active:scale-95 text-xl">
+                    Try Again
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="game-container"></div>
+
+    <script>
+        let scene, camera, renderer;
+        let world;
+        let playerBody, playerMesh;
+        let objectsToUpdate = [];
+        let movingPlatforms = [];
+        
+        // Input state
+        const keys = { w: false, a: false, s: false, d: false, space: false };
+        let canJump = false;
+        let isGameOver = false;
+
+        // Constants
+        const PLAYER_MASS = 10;
+        const JUMP_FORCE = 350;
+        const MOVE_FORCE = 150;
+        const TURN_SPEED = 2.5;
+        const MAX_SPEED = 15;
+
+        function init() {
+            // 1. Initialize Three.js Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 20, 150);
+
+            // 2. Initialize Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            // 3. Initialize Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.getElementById('game-container').appendChild(renderer.domElement);
+
+            // 4. Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(50, 100, 50);
+            dirLight.castShadow = true;
+            dirLight.shadow.camera.top = 100;
+            dirLight.shadow.camera.bottom = -100;
+            dirLight.shadow.camera.left = -100;
+            dirLight.shadow.camera.right = 100;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            scene.add(dirLight);
+
+            // 5. Initialize Cannon.js World
+            world = new CANNON.World();
+            world.gravity.set(0, -25, 0); // Stronger gravity for snappy jumps
+            world.broadphase = new CANNON.SAPBroadphase(world);
+            
+            // Physics materials
+            const defaultMaterial = new CANNON.Material("default");
+            const defaultContactMaterial = new CANNON.ContactMaterial(
+                defaultMaterial, defaultMaterial, { friction: 0.1, restitution: 0.0 }
+            );
+            world.addContactMaterial(defaultContactMaterial);
+
+            createPlayer(defaultMaterial);
+
+            createLevel(defaultMaterial);
+
+            // Event Listeners
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('keydown', (e) => handleKey(e, true));
+            document.addEventListener('keyup', (e) => handleKey(e, false));
+
+            // Start Loop
+            animate();
+        }
+
+        function createPlayer(physicsMaterial) {
+            // -- VISUALS (Three.js) --
+            playerMesh = new THREE.Group();
+            
+            // 1. Skateboard Deck
+            const deckGeo = new THREE.BoxGeometry(1.2, 0.15, 3);
+            const deckMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 });
+            const deck = new THREE.Mesh(deckGeo, deckMat);
+            deck.castShadow = true;
+            deck.position.y = -0.4;
+            playerMesh.add(deck);
+
+            // Wheels
+            const wheelGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.3, 16);
+            wheelGeo.rotateZ(Math.PI / 2);
+            const wheelMat = new THREE.MeshStandardMaterial({ color: 0xdd2222 });
+            const wheelPositions = [
+                [-0.6, -0.6, -1], [0.6, -0.6, -1],
+                [-0.6, -0.6, 1], [0.6, -0.6, 1]
+            ];
+            wheelPositions.forEach(pos => {
+                const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+                wheel.position.set(...pos);
+                wheel.castShadow = true;
+                playerMesh.add(wheel);
+            });
+
+            // 2. Hamster Body
+            const hamGeo = new THREE.SphereGeometry(0.7, 32, 32);
+            const hamMat = new THREE.MeshStandardMaterial({ color: 0xe6b981, roughness: 0.9 });
+            const hamster = new THREE.Mesh(hamGeo, hamMat);
+            hamster.position.y = 0.5;
+            hamster.castShadow = true;
+            playerMesh.add(hamster);
+
+            // Ears
+            const earGeo = new THREE.SphereGeometry(0.25, 16, 16);
+            const earMat = new THREE.MeshStandardMaterial({ color: 0xc9965f });
+            const earL = new THREE.Mesh(earGeo, earMat);
+            earL.position.set(-0.5, 1, -0.2);
+            const earR = new THREE.Mesh(earGeo, earMat);
+            earR.position.set(0.5, 1, -0.2);
+            playerMesh.add(earL, earR);
+
+            // Eyes
+            const eyeGeo = new THREE.SphereGeometry(0.1, 16, 16);
+            const eyeMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+            const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+            eyeL.position.set(-0.25, 0.7, -0.6);
+            const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+            eyeR.position.set(0.25, 0.7, -0.6);
+            playerMesh.add(eyeL, eyeR);
+
+            // Snout
+            const snoutGeo = new THREE.SphereGeometry(0.15, 16, 16);
+            const snoutMat = new THREE.MeshStandardMaterial({ color: 0xffaacc });
+            const snout = new THREE.Mesh(snoutGeo, snoutMat);
+            snout.position.set(0, 0.5, -0.7);
+            playerMesh.add(snout);
+
+            scene.add(playerMesh);
+
+            // -- PHYSICS (Cannon.js) --
+            // Using a simple box for the skateboard collision to keep it arcade-y and stable
+            const shape = new CANNON.Box(new CANNON.Vec3(0.6, 0.7, 1.5));
+            playerBody = new CANNON.Body({
+                mass: PLAYER_MASS,
+                material: physicsMaterial,
+                position: new CANNON.Vec3(0, 5, 0),
+                type: CANNON.Body.DYNAMIC,
+                fixedRotation: true // Prevent tipping over completely in this older version
+            });
+            playerBody.addShape(shape, new CANNON.Vec3(0, 0, 0));
+            
+            // Arcade physics: keep player upright
+            // We use fixedRotation and manually control the Y axis rotation
+            playerBody.updateMassProperties(); 
+            
+            playerBody.linearDamping = 0.05; // Muudetud 0.5 pealt 0.05 peale
+            playerBody.angularDamping = 0.9;
+            
+            world.addBody(playerBody);
+
+            // Collision handling for jumps and trampolines
+            playerBody.addEventListener("collide", function(e){
+                canJump = true;
+                
+                // Check if collided with a trampoline
+                if (e.body.isTrampoline) {
+                    playerBody.velocity.y = 25; // BOING!
+                }
+                
+                // Check if finish line
+                if (e.body.isFinish) {
+                    triggerWin();
+                }
+            });
+        }
+
+        function createPlatform(w, h, d, x, y, z, color, type = 'normal') {
+            // Visuals
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mat = new THREE.MeshStandardMaterial({ color: color });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, y, z);
+            mesh.receiveShadow = true;
+            mesh.castShadow = true;
+            scene.add(mesh);
+
+            // Physics
+            const shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
+            const body = new CANNON.Body({
+                mass: type === 'moving' ? 0 : 0, // 0 mass = static body
+                position: new CANNON.Vec3(x, y, z)
+            });
+            
+            if (type === 'moving') {
+                body.type = CANNON.Body.KINEMATIC; // Kinematic body can be moved manually but forces affect others
+            }
+
+            body.addShape(shape);
+            world.addBody(body);
+
+            if (type === 'trampoline') {
+                body.isTrampoline = true;
+                // Add stripes visual to trampoline
+                const stripes = new THREE.Mesh(
+                    new THREE.PlaneGeometry(w - 0.2, d - 0.2),
+                    new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent:true, opacity:0.5 })
+                );
+                stripes.rotation.x = -Math.PI / 2;
+                stripes.position.y = h/2 + 0.01;
+                mesh.add(stripes);
+            }
+            if (type === 'finish') body.isFinish = true;
+
+            if (type === 'moving') {
+                movingPlatforms.push({ body: body, mesh: mesh, startX: x, time: Math.random() * 10 });
+            }
+
+            return { mesh, body };
+        }
+
+        function createLevel() {
+            // Starting Platform
+            createPlatform(10, 1, 20, 0, -1, 5, 0x4ade80); // Green
+
+            // First Jump
+            createPlatform(10, 1, 10, 0, -1, -15, 0x3b82f6); // Blue
+
+            // Ramp up
+            let ramp = createPlatform(10, 1, 15, 0, 1.5, -30, 0xf59e0b); // Orange
+            ramp.body.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), Math.PI / 8);
+            ramp.mesh.quaternion.copy(ramp.body.quaternion);
+
+            // High Platform
+            createPlatform(10, 1, 20, 0, 4.3, -50, 0x8b5cf6); // Purple
+
+            // Trampoline (Bouncy!)
+            createPlatform(8, 1, 8, 0, -2, -70, 0xec4899, 'trampoline'); // Pink
+
+            // Higher Platform after trampoline
+            createPlatform(10, 1, 20, 0, 15, -100, 0x06b6d4); // Cyan
+
+            // Moving Platforms Gap
+            createPlatform(6, 1, 6, 0, 15, -118, 0xf43f5e, 'moving'); // Rose
+            createPlatform(6, 1, 6, 0, 15, -130, 0xf43f5e, 'moving');
+
+            // Finish Line
+            createPlatform(20, 1, 20, 0, 15, -150, 0x22c55e, 'finish'); // Bright Green
+            
+            // Add some decorative trees
+            for(let i=0; i<5; i++) {
+                let r = Math.random() > 0.5 ? 1 : -1;
+                createTree(r * 15, -1, -20 - i*20);
+            }
+        }
+
+        function createTree(x, y, z) {
+            const trunk = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.5, 0.7, 4),
+                new THREE.MeshStandardMaterial({color: 0x8B4513})
+            );
+            trunk.position.set(x, y+2, z);
+            trunk.castShadow = true;
+            
+            const leaves = new THREE.Mesh(
+                new THREE.ConeGeometry(3, 6, 8),
+                new THREE.MeshStandardMaterial({color: 0x228B22})
+            );
+            leaves.position.set(x, y+6, z);
+            leaves.castShadow = true;
+
+            scene.add(trunk, leaves);
+        }
+
+        function handleKey(event, isDown) {
+            const key = event.key.toLowerCase();
+            if (key === 'w' || key === 'arrowup') keys.w = isDown;
+            if (key === 'a' || key === 'arrowleft') keys.a = isDown;
+            if (key === 's' || key === 'arrowdown') keys.s = isDown;
+            if (key === 'd' || key === 'arrowright') keys.d = isDown;
+            if (key === ' ') {
+                keys.space = isDown;
+                // Immediate jump trigger to avoid missing the frame
+                if (isDown && canJump && !isGameOver) {
+                    playerBody.velocity.y = 12;
+                    canJump = false;
+                }
+            }
+        }
+
+        function updatePhysics() {
+            if (isGameOver) return;
+
+            // 1. Handle Movement Forces
+            // Get player forward direction based on current rotation
+            const forwardVector = new CANNON.Vec3(0, 0, -1);
+            
+            // In older cannon.js with fixedRotation, we might need to manually handle the rotation of the mesh
+            // Since fixedRotation is on, the body won't rotate via forces. We rotate it directly based on input.
+            
+            if (keys.a) {
+                // Manually rotate the body's quaternion for steering
+                const q = new CANNON.Quaternion();
+                q.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), TURN_SPEED * (1/60));
+                playerBody.quaternion = q.mult(playerBody.quaternion);
+            } else if (keys.d) {
+                const q = new CANNON.Quaternion();
+                q.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), -TURN_SPEED * (1/60));
+                playerBody.quaternion = q.mult(playerBody.quaternion);
+            }
+
+            // Apply rotation to forward vector
+            playerBody.quaternion.vmult(forwardVector, forwardVector);
+
+            const moveAcceleration = 1.5;
+            let isMoving = false;
+
+            if (keys.w) {
+                // Lisame kiirust otse
+                playerBody.velocity.x += forwardVector.x * moveAcceleration;
+                playerBody.velocity.z += forwardVector.z * moveAcceleration;
+                isMoving = true;
+            }
+            if (keys.s) {
+                // Pidurdamine / Tagurdamine
+                playerBody.velocity.x -= forwardVector.x * moveAcceleration;
+                playerBody.velocity.z -= forwardVector.z * moveAcceleration;
+                isMoving = true;
+            }
+
+            // Rakendame hõõrdumist AINULT horisontaaltelgedele (X ja Z), kui mängija ei vajuta gaasi.
+            // See laseb rulal sujuvalt seisma jääda, rikkumata seejuures gravitatsiooni (Y telge).
+            if (!isMoving) {
+                playerBody.velocity.x *= 0.85;
+                playerBody.velocity.z *= 0.85;
+            }
+
+            // Piirame maksimaalset kiirust horisontaaltasapinnal
+            const currentSpeed = Math.sqrt(playerBody.velocity.x**2 + playerBody.velocity.z**2);
+            if(currentSpeed > MAX_SPEED) {
+                const factor = MAX_SPEED / currentSpeed;
+                playerBody.velocity.x *= factor;
+                playerBody.velocity.z *= factor;
+            }
+
+            // 3. Update Moving Platforms
+            const time = performance.now() * 0.002;
+            movingPlatforms.forEach(p => {
+                p.body.position.x = p.startX + Math.sin(time + p.time) * 12; // Oscillate left/right
+                // Sync visual mesh directly for kinematic bodies
+                p.mesh.position.copy(p.body.position);
+            });
+
+            // 4. Step Physics World
+            world.step(1 / 60);
+
+            // 5. Sync Visuals to Physics
+            playerMesh.position.copy(playerBody.position);
+            playerMesh.quaternion.copy(playerBody.quaternion);
+
+            // 6. Death Check (Fall out of bounds)
+            if (playerBody.position.y < -20) {
+                triggerGameOver();
+            }
+        }
+
+        function updateCamera() {
+            if (!playerMesh) return;
+
+            // Third person follow camera
+            // Calculate desired camera position relative to player
+            const relativeCameraOffset = new THREE.Vector3(0, 4, 12);
+            const cameraOffset = relativeCameraOffset.applyMatrix4(playerMesh.matrixWorld);
+            
+            // Smoothly interpolate current camera position towards desired position
+            camera.position.lerp(cameraOffset, 0.1);
+            
+            // Look slightly ahead of the player
+            const lookTarget = playerMesh.position.clone().add(new THREE.Vector3(0, 2, 0));
+            camera.lookAt(lookTarget);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            updatePhysics();
+            updateCamera();
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function triggerGameOver() {
+            if (isGameOver) return;
+            isGameOver = true;
+            document.getElementById('end-title').innerText = "Wasted!";
+            document.getElementById('end-title').className = "text-5xl font-black text-red-500 mb-2";
+            document.getElementById('end-desc').innerText = "You fell into the abyss.";
+            const goMenu = document.getElementById('game-over');
+            goMenu.classList.remove('hidden');
+        }
+
+        function triggerWin() {
+            if (isGameOver) return;
+            isGameOver = true;
+            document.getElementById('end-title').innerText = "Awesome!";
+            document.getElementById('end-title').className = "text-5xl font-black text-green-500 mb-2";
+            document.getElementById('end-desc').innerText = "You reached the end of the course!";
+            const goMenu = document.getElementById('game-over');
+            goMenu.classList.remove('hidden');
+        }
+
+        function resetGame() {
+            isGameOver = false;
+            document.getElementById('game-over').classList.add('hidden');
+            
+            // Reset player physics
+            playerBody.position.set(0, 5, 0);
+            playerBody.velocity.set(0, 0, 0);
+            playerBody.angularVelocity.set(0, 0, 0);
+            playerBody.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), 0); // Face forward
+            canJump = false;
+        }
+
+        // Boot up!
+        window.onload = init;
+    </script>
+</body>
+</html> 
