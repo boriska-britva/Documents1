@@ -11,20 +11,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install lftp
-        run: sudo apt-get install -y lftp
-
-      - name: Setup SSH key
+      - name: Deploy via SSH and rsync
+        env:
+          SFTP_SERVER: ${{ secrets.SFTP_SERVER }}
+          SFTP_USERNAME: ${{ secrets.SFTP_USERNAME }}
+          SFTP_PRIVATE_KEY: ${{ secrets.SFTP_PRIVATE_KEY }}
+          SFTP_KEY_PASSPHRASE: ${{ secrets.SFTP_KEY_PASSPHRASE }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SFTP_PRIVATE_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-      - name: Deploy via SFTP
-        run: |
-          lftp -u ${{ secrets.SSH_USER }}, sftp://${{ secrets.SSH_HOST }} <<'EOF'
-          set sftp:connect-program "ssh -a -x -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key"
-          set net:max-retries 3
-          mirror --reverse --delete --exclude-glob .git* --exclude-glob .github* . ${{ secrets.SSH_TARGET }}
-          bye
-          EOF
+          cat > ~/.ssh/askpass <<'ASKPASS'
+          #!/bin/sh
+          printf '%s\n' "$SFTP_KEY_PASSPHRASE"
+          ASKPASS
+          chmod 700 ~/.ssh/askpass
+
+          eval "$(ssh-agent -s)"
+          DISPLAY=:0 SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$HOME/.ssh/askpass" \
+            ssh-add ~/.ssh/deploy_key < /dev/null
+
+          ssh-keyscan -H "$SFTP_SERVER" >> ~/.ssh/known_hosts
+          remote="$SFTP_USERNAME@$SFTP_SERVER"
+          deploy_path=/data03/virt150876/domeenid/www.kiir.eu/htdocs/project
+
+          ssh "$remote" 'command -v rsync >/dev/null || { echo "rsync is not installed on the server" >&2; exit 127; }'
+          ssh "$remote" "mkdir -p '$deploy_path'"
+          rsync -az --delete \
+            --exclude='.git*' \
+            --exclude='.github*' \
+            -e 'ssh -o StrictHostKeyChecking=yes' \
+            ./ "$remote:$deploy_path/"
