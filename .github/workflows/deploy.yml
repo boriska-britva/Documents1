@@ -36,7 +36,7 @@ jobs:
 
           ssh-keyscan -H "$SFTP_SERVER" >> ~/.ssh/known_hosts
           remote="$SFTP_USERNAME@$SFTP_SERVER"
-          deploy_path=/data03/virt150876/domeenid/www.kiir.eu/htdocs 
+          deploy_path=/data03/virt150876/domeenid/www.kiir.eu/htdocs/test
 
           ssh "$remote" 'command -v rsync >/dev/null || { echo "rsync is not installed on the server" >&2; exit 127; }'
           ssh "$remote" "mkdir -p '$deploy_path'"
