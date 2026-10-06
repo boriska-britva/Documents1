@@ -1,22 +1,30 @@
-name: Deploy to Zone via SSH
+name: Deploy to Zone Media
 
 on:
   push:
     branches:
-      - dev
       - main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Deploy files via SSH (rsync)
-        uses: easingthemes/ssh-deploy@main
-        with:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          REMOTE_HOST: ${{ secrets.SSH_HOST }}
-          REMOTE_USER: ${{ secrets.SSH_USER }}
-          TARGET: ${{ secrets.SSH_TARGET }}
+      - name: Install lftp
+        run: sudo apt-get install -y lftp
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Deploy via SFTP
+        run: |
+          lftp -u ${{ secrets.SSH_USER }}, sftp://${{ secrets.SSH_HOST }} <<'EOF'
+          set sftp:connect-program "ssh -a -x -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key"
+          set net:max-retries 3
+          mirror --reverse --delete --exclude-glob .git* --exclude-glob .github* . ${{ secrets.SSH_TARGET }}
+          bye
+          EOF
